@@ -31,8 +31,20 @@ class CategoriesViewController: UIViewController, UITableViewDataSource, UITable
     var categories = Variable<[EOCategory]>([])
     let disposeBag = DisposeBag()
     
+    var activityIndicator: UIActivityIndicatorView!
+    let download = DownloadView()
+    
     override func viewDidLoad() {
         super.viewDidLoad()
+        
+        activityIndicator = UIActivityIndicatorView()
+//        activityIndicator.backgroundColor = UIColor.black
+        navigationItem.rightBarButtonItem = UIBarButtonItem(customView: activityIndicator)
+        activityIndicator.startAnimating()
+        
+        view.addSubview(download)
+        view.layoutIfNeeded()
+        print(download.frame)
         
         categories
             .asObservable()
@@ -46,20 +58,57 @@ class CategoriesViewController: UIViewController, UITableViewDataSource, UITable
     }
     
     func startDownload() {
-        let eoCategories = EONET.categories
-        let downloadedEvents = EONET.events(forLast: 360)
+        download.progress.progress = 0.0
+        download.label.text = "Download: 0%"
         
-        let updatedCategories = Observable
-            .combineLatest(eoCategories, downloadedEvents) {
-                (categories, events) -> [EOCategory] in
-                return categories.map { category in
-                    var cat = category
-                    cat.events = events.filter {
-                        $0.categories.contains(category.id)
+        // get all the categories
+        let eoCategories = EONET.categories
+        
+        // then call flatMap to transform them into an
+        // observable emitting one observable of events for each category
+        let downloadedEvents = eoCategories.flatMap({categories in
+            return Observable.from(categories.map({category in
+                EONET.events(forLast: 360, category: category)
+            }))
+            // merge all these observables into a single stream of event arrays
+        }).merge(maxConcurrent: 2)
+        
+        let updatedCategories = eoCategories.flatMap { categories in
+            downloadedEvents.scan(categories) { updated, events in
+                return updated.map { category in
+                    let eventsForCategory = EONET.filteredEvents(events: events, forCategory: category)
+                    if !eventsForCategory.isEmpty {
+                        var cat = category
+                        cat.events = cat.events + eventsForCategory
+                        return cat
                     }
-                    return cat
+                    return category
                 }
-        }
+            }
+            }
+            .do(onCompleted: { [weak self] in
+                DispatchQueue.main.async {
+                    self?.activityIndicator.stopAnimating()
+                    self?.download.isHidden = true
+                }
+            })
+        
+        eoCategories.flatMap { categories in
+            return updatedCategories.scan(0) { count, _ in
+                return count + 1
+                }
+                .startWith(0)
+                .map { ($0, categories.count) }
+            }
+            .subscribe(onNext: { tuple in
+                DispatchQueue.main.async { [weak self] in
+                    let progress = Float(tuple.0) / Float(tuple.1)
+                    self?.download.progress.progress = progress
+                    let percent = Int(progress * 100.0)
+                    self?.download.label.text = "Download: \(percent)%"
+                }
+            })
+            .disposed(by: disposeBag)
         
         eoCategories
             .concat(updatedCategories)
