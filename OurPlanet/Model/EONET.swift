@@ -26,7 +26,8 @@ import RxSwift
 import RxCocoa
 
 class EONET {
-    static let API = "https://eonet.sci.gsfc.nasa.gov/api/v2.1"
+    // https://eonet.sci.gsfc.nasa.gov/api/v2/events
+    static let API = "https://eonet.sci.gsfc.nasa.gov/api/v2"
     static let categoriesEndpoint = "/categories"
     static let eventsEndpoint = "/events"
     
@@ -55,6 +56,7 @@ class EONET {
                     throw EOError.invalidURL(endpoint)
             }
             
+            print("url string: \(url)")
             components.queryItems = try query.flatMap({ (key, value) in
                 guard let v = value as? CustomStringConvertible else {
                     throw EOError.invalidParameter(key, value)
@@ -78,4 +80,51 @@ class EONET {
             return Observable.empty()
         }
     }
+
+    // singleton (static var)
+    static var categories: Observable<[EOCategory]> = {
+        // Request data from the categories endpoint
+        return EONET.request(endpoint: categoriesEndpoint)
+            // Extract the categories array from the response
+            // Map it to an array of EOCategory objects and sort them by name
+            .map({ data in
+                let categories = data["categories"] as? [[String:Any]] ?? []
+                return categories
+                    .flatMap(EOCategory.init).sorted(by: {
+                        $0.name < $1.name
+                    })
+            })
+            // share(replay: 1) relays all elements to the first subscriber
+            // acts much like a cache
+            .share(replay: 1)
+    }()
+    
+    fileprivate static func events(forLast days: Int, closed: Bool) ->
+        Observable<[EOEvent]> {
+            return request(endpoint: eventsEndpoint, query: [
+                "days": NSNumber(value: days),
+                "status": (closed ? "closed" : "open")
+                ])
+                .map { json in
+                    guard let raw = json["events"] as? [[String: Any]] else {
+                        throw EOError.invalidJSON(eventsEndpoint)
+                    }
+                    return raw.flatMap(EOEvent.init)
+            }
+    }
+    
+    // This is the function you’ll call from view controllers to get events
+    static func events(forLast days: Int = 360) -> Observable<[EOEvent]> {
+        let openEvents = events(forLast: days, closed: false)
+        let closedEvents = events(forLast: days, closed: true)
+//        return openEvents.concat(closedEvents)
+        return Observable.of(openEvents, closedEvents)
+            // merge() takes an observable of observables
+            .merge()
+            .reduce([]){ running, new in
+            running + new
+        }
+    }
+    
+    
 }
